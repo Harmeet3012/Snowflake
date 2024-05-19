@@ -1,0 +1,299 @@
+-- PART - 01
+create database AnimePahe;
+
+use database AnimePahe;
+
+create schema Landing;
+create schema Curated;
+create schema Consumption;
+
+use schema Landing;
+
+create table Anime_Landing(
+Title varchar(50),
+Genre varchar(70),
+Age_Group_Recommendation varchar(5),
+Rating number(5,1)
+);
+
+create table Otaku_Landing(
+Name varchar(30),
+Age_Group varchar(5),
+Favourite_Anime varchar(50)
+);
+
+create or replace file format File_Format_Landing
+type = 'csv'
+compression = 'auto'
+field_delimiter= ','
+record_delimiter = '\n'
+skip_header = 1
+field_optionally_enclosed_by = '\042'
+null_if = ('\\N');
+
+select * from ANIME_LANDING;
+select * from OTAKU_LANDING;
+
+
+-- PART - 02
+use database ANIMEPAHE;
+use schema curated;
+
+create table Anime_Curated(
+Title varchar(50),
+Genre varchar(70),
+Age_Group_Recommendation varchar(5),
+Rating number(5,1)
+);
+
+create table Otaku_Curated(
+Name varchar(30),
+Age_Group varchar(5),
+Favourite_Anime varchar(50)
+);
+
+insert into Anime_Curated(select * from Animepahe.LANDING.ANIME_LANDING);
+insert into OTAKU_CURATED(select * from ANIMEPAHE.LANDING.OTAKU_LANDING);
+
+select * from ANIME_CURATED;
+select * from OTAKU_CURATED;
+
+-- PART - 03
+use database ANIMEPAHE;
+
+use schema CONSUMPTION;
+
+create table Anime_Consumption(
+Title varchar(50),
+Genre varchar(70),
+Age_Group_Recommendation varchar(5),
+Rating number(5,1)
+);
+
+create table Otaku_Consumption(
+Name varchar(30),
+Age_Group varchar(5),
+Favourite_Anime varchar(50)
+);
+
+insert into ANIME_CONSUMPTION( select * from ANIMEPAHE.CURATED.ANIME_CURATED);
+insert into OTAKU_CONSUMPTION( select * from ANIMEPAHE.CURATED.OTAKU_CURATED);
+
+select * from ANIME_CONSUMPTION;
+select * from OTAKU_CONSUMPTION;
+
+
+-- PART - 04
+use database ANIMEPAHE;
+
+use schema LANDING;
+
+create or replace Stage New_Anime_S3
+url='s3://animetion/anime/'
+file_format = (format_name=ANIMEPAHE.LANDING.FILE_FORMAT_LANDING)
+comment='new animes file';
+
+create or replace Stage New_Otaku_S3
+url='s3://animetion/otaku/'
+file_format = (format_name=ANIMEPAHE.LANDING.FILE_FORMAT_LANDING)
+comment='new otakus file';
+
+show stages;
+list @New_Otaku_S3;
+select $1,$2,$3,$4 from @New_Anime_S3;
+select $1,$2,$3 from @New_Otaku_S3;
+
+create or replace pipe anime_pipe
+auto_ingest=TRUE
+as
+copy into ANIMEPAHE.LANDING.ANIME_LANDING
+from @New_Anime_S3
+file_format = (format_name=ANIMEPAHE.LANDING.FILE_FORMAT_LANDING)
+pattern = '.*anime.*[.]csv'
+ON_ERROR = 'CONTINUE';
+
+create or replace pipe otaku_pipe
+auto_ingest=TRUE
+as
+copy into ANIMEPAHE.LANDING.OTAKU_LANDING
+from @New_Otaku_S3
+file_format = (format_name=ANIMEPAHE.LANDING.FILE_FORMAT_LANDING)
+pattern = '.*otaku.*[.]csv'
+ON_ERROR = 'CONTINUE';
+
+show pipes;
+alter pipe anime_pipe refresh;
+alter pipe otaku_pipe refresh;
+
+select system$pipe_status('anime_pipe');
+select system$pipe_status('otaku_pipe');
+
+-- PART - 05
+use database ANIMEPAHE;
+use schema LANDING;
+
+create or replace stream anime_landing_stream
+on table anime_landing
+append_only = TRUE;
+
+create or replace stream otaku_landing_stream
+on table otaku_landing
+append_only = TRUE;
+
+use schema CURATED;
+
+create or replace task anime_curated_task
+warehouse = compute_wh
+schedule = '5 minute'
+when system$stream_has_data('ANIMEPAHE.LANDING.ANIME_LANDING_STREAM')
+as
+merge into ANIMEPAHE.CURATED.ANIME_CURATED animeCur
+using ANIMEPAHE.LANDING.ANIME_LANDING_STREAM animeLanStrm
+on animeCur.Title = animeLanStrm.Title
+when matched
+    then
+        update set
+        animeCur.Title=animeLanStrm.Title,
+        animeCur.Genre=animeLanStrm.Genre,
+        animeCur.Age_Group_Recommendation=animeLanStrm.Age_Group_Recommendation,
+        animeCur.Rating=animeLanStrm.Rating
+when not matched
+    then
+        insert(
+        Title,
+        Genre,
+        Age_Group_Recommendation,
+        Rating)
+        values(
+        animeLanStrm.Title,
+        animeLanStrm.Genre,
+        animeLanStrm.Age_Group_Recommendation,
+        animeLanStrm.Rating
+        );
+
+create or replace task otaku_curated_task
+warehouse=compute_wh
+schedule='5 minute'
+when system$stream_has_data('ANIMEPAHE.LANDING.OTAKU_LANDING_STREAM')
+as
+merge into ANIMEPAHE.CURATED.OTAKU_CURATED otakuCur
+using ANIMEPAHE.LANDING.OTAKU_LANDING_STREAM otakuLanStrm
+on otakuCur.Name = otakuLanStrm.Name
+when matched
+    then
+        update set
+        otakuCur.Name=otakuLanStrm.Name,
+        otakuCur.Age_Group=otakuLanStrm.Age_Group,
+        otakuCur.Favourite_Anime=otakuLanStrm.Favourite_Anime
+when not matched
+    then
+        insert(
+        Name,
+        Age_Group,
+        Favourite_Anime
+        )
+        values(
+        otakuLanStrm.Name,
+        otakuLanStrm.Age_Group,
+        otakuLanStrm.Favourite_Anime
+        );
+
+show tasks;
+alter task ANIMEPAHE.CURATED.ANIME_CURATED_TASK resume;
+alter task ANIMEPAHE.CURATED.OTAKU_CURATED_TASK resume;
+
+-- PART - 06
+use database ANIMEPAHE;
+use schema CURATED;
+
+create or replace stream ANIMEPAHE.CURATED.ANIME_CURATED_STREAM
+on table ANIMEPAHE.CURATED.ANIME_CURATED;
+
+create or replace stream ANIMEPAHE.CURATED.OTAKU_CURATED_STREAM
+on table ANIMEPAHE.CURATED.OTAKU_CURATED;
+
+use schema CONSUMPTION;
+
+create or replace task anime_consumption_task
+warehouse=compute_wh
+schedule='7 minute'
+when system$stream_has_data('ANIMEPAHE.CURATED.ANIME_CURATED_STREAM')
+as
+merge into ANIMEPAHE.CONSUMPTION.ANIME_CONSUMPTION animeCons
+using ANIMEPAHE.CURATED.ANIME_CURATED_STREAM animeCurStrm
+on animeCons.Title = animeCurStrm.Title
+when matched 
+and animeCurStrm.METADATA$ACTION = 'INSERT' 
+and animeCurStrm.METADATA$ISUPDATE = 'TRUE'
+    then
+        update set
+        animeCons.Title=animeCurStrm.Title,
+        animeCons.Genre=animeCurStrm.Genre,
+        animeCons.Age_Group_Recommendation=animeCurStrm.Age_Group_Recommendation,
+        animeCons.Rating=animeCurStrm.Rating
+when not matched
+and animeCurStrm.METADATA$ACTION = 'INSERT' 
+and animeCurStrm.METADATA$ISUPDATE = 'FALSE'
+then
+    insert(
+        Title,
+        Genre,
+        Age_Group_Recommendation,
+        Rating)
+        values(
+        animeCurStrm.Title,
+        animeCurStrm.Genre,
+        animeCurStrm.Age_Group_Recommendation,
+        animeCurStrm.Rating
+        );
+
+create or replace task otaku_consumption_task
+warehouse=compute_wh
+schedule='7 minute'
+when system$stream_has_data('ANIMEPAHE.CURATED.OTAKU_CURATED_STREAM')
+as 
+merge into ANIMEPAHE.CONSUMPTION.OTAKU_CONSUMPTION otakuCons
+using ANIMEPAHE.CURATED.OTAKU_CURATED_STREAM otakuCurStrm
+on otakuCons.Name = otakuCurStrm.Name
+when matched
+and otakuCurStrm.METADATA$ACTION = 'INSERT'
+and otakuCurStrm.METADATA$ISUPDATE = 'TRUE'
+then
+    update set
+    otakuCons.Name=otakuCurStrm.Name,
+    otakuCons.Age_Group=otakuCurStrm.Age_Group,
+    otakuCons.Favourite_Anime=otakuCurStrm.Favourite_Anime
+when not matched
+and otakuCurStrm.METADATA$ACTION = 'INSERT'
+and otakuCurStrm.METADATA$ISUPDATE = 'FALSE'
+then
+        insert(
+        Name,
+        Age_Group,
+        Favourite_Anime
+        )
+        values(
+        otakuCurStrm.Name,
+        otakuCurStrm.Age_Group,
+        otakuCurStrm.Favourite_Anime
+        );
+
+show tasks;
+alter task ANIMEPAHE.CONSUMPTION.ANIME_CONSUMPTION_TASK resume;
+alter task ANIMEPAHE.CONSUMPTION.OTAKU_CONSUMPTION_TASK resume;
+
+-- PART - 07
+use database ANIMEPAHE;
+use schema LANDING;
+
+select * from ANIMEPAHE.LANDING.ANIME_LANDING;
+select * from ANIMEPAHE.LANDING.OTAKU_LANDING;
+select * from ANIMEPAHE.INFORMATION_SCHEMA.PIPES;
+
+use schema CURATED;
+select * from ANIMEPAHE.CURATED.ANIME_CURATED;
+select * from ANIMEPAHE.CURATED.OTAKU_CURATED;
+
+use schema CONSUMPTION;
+select * from ANIMEPAHE.CONSUMPTION.ANIME_CONSUMPTION;
+select * from ANIMEPAHE.CONSUMPTION.OTAKU_CONSUMPTION;
